@@ -269,3 +269,14 @@ onRecordAfterUpdateSuccess((e) => {
   }
   e.next();
 }, "auftraege");
+
+// Cache-Regeln für die App-Hülle: Service Worker und Startseite immer frisch,
+// Dateien mit Inhalts-Hash im Namen dürfen lange gecacht werden.
+routerUse((e) => {
+  const p = e.request.url.path;
+  if ((e.request.method === "GET" || e.request.method === "HEAD") && !p.startsWith("/api/") && !p.startsWith("/_/")) {
+    if (/^\/app\.[0-9a-f]{10}\.(js|css)$/.test(p) || p.startsWith("/fonts/")) e.response.header().set("Cache-Control", "public, max-age=31536000, immutable");
+    else e.response.header().set("Cache-Control", "no-cache");
+  }
+  return e.next();
+});

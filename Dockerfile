@@ -10,6 +10,10 @@ RUN apk add --no-cache ca-certificates unzip wget \
 COPY pb_migrations /pb/pb_migrations
 COPY pb_hooks /pb/pb_hooks
 COPY pb_public /pb/pb_public
+# Dateinamen mit Inhalts-Hash: Browser und CDN holen bei jeder Änderung sofort die neue Version.
+RUN cd /pb/pb_public && v=$(cat app.js app.css | md5sum | cut -c1-10) \
+ && mv app.js app.$v.js && mv app.css app.$v.css \
+ && sed -i "s/__V__/$v/g" index.html sw.js
 COPY seed /pb/seed
 COPY entrypoint.sh /pb/entrypoint.sh
 RUN chmod +x /pb/entrypoint.sh

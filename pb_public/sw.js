@@ -1,6 +1,6 @@
 // Fokus Service Worker: hält die App-Hülle bereit, Daten kommen immer frisch vom Server.
-const CACHE = "fokus-v3";
-const SHELL = ["/", "/index.html", "/app.css", "/app.js", "/manifest.webmanifest",
+const CACHE = "fokus-__V__";
+const SHELL = ["/", "/index.html", "/app.__V__.css", "/app.__V__.js", "/manifest.webmanifest",
   "/icons/icon-192.png", "/fonts/montserrat-latin-400-normal.woff2", "/fonts/montserrat-latin-700-normal.woff2",
   "/fonts/montserrat-latin-800-normal.woff2"];
 
@@ -15,7 +15,7 @@ self.addEventListener("fetch", (e) => {
   if (e.request.method !== "GET" || url.origin !== location.origin || url.pathname.startsWith("/api/") || url.pathname.startsWith("/_/")) return;
   // Netz zuerst, damit neue Versionen sofort ankommen; ohne Netz die gespeicherte Hülle.
   e.respondWith(
-    fetch(e.request).then((res) => {
+    fetch(e.request, { cache: "no-cache" }).then((res) => {
       const copy = res.clone();
       caches.open(CACHE).then((c) => c.put(e.request, copy));
       return res;
