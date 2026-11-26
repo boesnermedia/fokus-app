@@ -15,7 +15,7 @@ const store = {
 
 const S = {
   token: store.get("token", ""), me: store.get("me", null),
-  auftraege: [], aufgaben: [], eingang: [], starts: 0,
+  auftraege: [], aufgaben: [], eingang: [], rechnungen: [], starts: 0,
   loaded: false, skip: new Set(), timer: null, showMore: false,
 };
 
@@ -46,13 +46,14 @@ const logEvent = (typ, aufgabe, info) => create("ereignisse", { typ, aufgabe: au
 async function load() {
   const monday = new Date(); monday.setHours(0, 0, 0, 0); monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7));
   const since = monday.toISOString().replace("T", " ");
-  const [a, t, e, st] = await Promise.all([
+  const [a, t, e, st, re] = await Promise.all([
     listAll("auftraege", "archiv = false", "-updated"),
     listAll("aufgaben", "status = 'offen'", "-updated"),
     listAll("eingang", "status = 'neu'", "created"),
     api(`${col("ereignisse")}?${new URLSearchParams({ perPage: "1", filter: `typ = 'start' && created >= '${since}'` })}`),
+    listAll("rechnungen", "status = 'offen'", "datum").catch(() => []),
   ]);
-  S.auftraege = a; S.aufgaben = t; S.eingang = e; S.starts = st.totalItems; S.loaded = true;
+  S.auftraege = a; S.aufgaben = t; S.eingang = e; S.starts = st.totalItems; S.rechnungen = re; S.loaded = true;
 }
 
 function patchLocal(list, rec) {
@@ -99,6 +100,7 @@ function context(t) {
   if (d !== null) bits.push(d < 0 ? "überfällig" : d === 0 ? "heute fällig" : d === 1 ? "morgen fällig" : d <= 6 ? "fällig " + new Date(t.due || a.due).toLocaleDateString("de-DE", { weekday: "short" }) : "fällig " + new Date(t.due || a.due).toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit" }));
   return bits.join(" · ");
 }
+const euro = (n) => (n || 0).toLocaleString("de-DE", { style: "currency", currency: "EUR", maximumFractionDigits: 0 });
 const minutes = (t) => (t.s === "S" ? 10 : 15);
 const title = (t) => { const a = auftragOf(t); return a && !t.titel.toLowerCase().includes((a.kunde || "").toLowerCase()) ? `${t.titel}` : t.titel; };
 
@@ -211,12 +213,19 @@ function vAuftraege(view) {
   const best = (a) => Math.max(...S.aufgaben.filter((t) => t.auftrag === a.id).map(score), -99);
   const active = working.filter((a) => !a.ruht && hasTask(a)).sort((x, y) => best(y) - best(x)).slice(0, 4);
   const resting = working.filter((a) => !active.includes(a));
-  const fertig = all.filter((a) => a.phase === 4), rechnung = all.filter((a) => a.phase === 5);
+  // Fertig ohne Rechnung: Phase „Fertig“ und keine (End-)Rechnung aus Lexware verknüpft.
+  const isTeil = (r) => /teilrechnung|abschlag/i.test(r.titel || "");
+  const billed = new Set(S.rechnungen.filter((r) => r.auftrag && !isTeil(r)).map((r) => r.auftrag));
+  const fertig = all.filter((a) => a.phase === 4 && !billed.has(a.id));
+  const offene = S.rechnungen;
+  const summe = offene.reduce((x, r) => x + (r.offen || 0), 0);
+  const alt = offene.filter((r) => (days(r.datum) ?? 0) <= -30);
+  const stand = offene.map((r) => r.abgeglichen).sort().pop();
   const bm = S.aufgaben.filter((t) => t.art === "bm" && !t.auftrag).sort((a, b) => score(b) - score(a));
   let body = "";
   if (tab === "aktiv") {
-    body = `${fertig.length ? `<button class="money mt" data-tab="fertig"><span class="num">${fertig.length}</span><span style="flex:1"><b>Fertig, aber nicht abgerechnet.</b><br><span class="small">Antippen für die Liste.</span></span><svg viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg></button>` : ""}
-    ${rechnung.length ? `<button class="link" data-tab="rechnung">${rechnung.length} Rechnungen warten auf Zahlung</button>` : ""}
+    body = `${fertig.length ? `<button class="money mt" data-tab="fertig"><span class="num">${fertig.length}</span><span style="flex:1"><b>Fertig, aber noch keine Rechnung.</b><br><span class="small">Antippen für die Liste.</span></span><svg viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg></button>` : ""}
+    ${offene.length ? `<button class="money mt" data-tab="rechnungen" style="background:var(--n800)"><span class="num">${offene.length}</span><span style="flex:1"><b>Rechnungen offen · ${euro(summe)}</b><br><span class="small">${alt.length ? `${alt.length} davon seit über 30 Tagen` : "Keine älter als 30 Tage"}${stand ? " · Stand Lexware " + new Date(stand).toLocaleDateString("de-DE") : ""}</span></span><svg viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg></button>` : ""}
     <div class="list mt">${active.map(orderRow).join("") || '<p class="muted">Gerade nichts Aktives.</p>'}</div>
     ${resting.length ? `<button class="link mt" data-more>${S.showMore ? "Weitere ausblenden" : `${resting.length} weitere Aufträge zeigen`}</button>` : ""}
     ${S.showMore ? `<div class="list" style="opacity:.7">${resting.map(orderRow).join("")}</div>` : ""}`;
@@ -226,10 +235,16 @@ function vAuftraege(view) {
     body = `<div class="list mt">${top.map(row).join("") || '<p class="muted">Nichts hinter den Kulissen.</p>'}</div>
     ${rest.length ? `<button class="link mt" data-more>${S.showMore ? "Weniger zeigen" : `${rest.length} weitere zeigen`}</button>` : ""}
     ${S.showMore ? `<div class="list" style="opacity:.7">${rest.map(row).join("")}</div>` : ""}`;
+  } else if (tab === "rechnungen") {
+    body = `<button class="link" data-tab="aktiv">← Zurück</button><h2 class="mt">Offene Rechnungen<span class="dot">.</span></h2>
+    <p class="small muted">Aus Lexware${stand ? ", Stand " + new Date(stand).toLocaleString("de-DE", { dateStyle: "short", timeStyle: "short" }) : ""}. Nach 30 Tagen ohne Zahlung legt die App eine Aufgabe an.</p>
+    <div class="list mt">${offene.map((r) => { const age = -(days(r.datum) ?? 0); const a = S.auftraege.find((x) => x.id === r.auftrag);
+      return `<a class="item" href="${a ? `#auftrag/${esc(a.id)}` : "#auftraege/rechnungen"}"><div class="top"><span class="t">${esc(r.nr)} · ${esc(r.kunde || "")}</span><span style="white-space:nowrap;font-weight:700">${euro(r.offen)}</span></div>
+      <span class="small ${age >= 30 ? "" : "muted"}" ${age >= 30 ? 'style="color:var(--m400)"' : ""}>vom ${esc(new Date(r.datum).toLocaleDateString("de-DE"))} · seit ${age} ${age === 1 ? "Tag" : "Tagen"} offen${a ? " · " + esc(a.name) : ""}</span>${r.hinweis ? `<span class="small muted">${esc(r.hinweis)}</span>` : ""}</a>`; }).join("") || '<p class="muted">Keine offenen Rechnungen.</p>'}</div>`;
   } else {
-    const l = tab === "fertig" ? fertig : rechnung;
-    body = `<button class="link" data-tab="aktiv">← Zurück</button><h2 class="mt">${tab === "fertig" ? "Fertig, nicht abgerechnet" : "Rechnung verschickt"}<span class="dot">.</span></h2>
-    <p class="small muted">${tab === "fertig" ? "Rechnung stellen, dann auf „Rechnung“ schieben." : "Sobald das Geld da ist, auf „Bezahlt“ schieben."}</p><div class="list mt">${l.map(orderRow).join("")}</div>`;
+    const l = fertig;
+    body = `<button class="link" data-tab="aktiv">← Zurück</button><h2 class="mt">Fertig, noch keine Rechnung<span class="dot">.</span></h2>
+    <p class="small muted">Rechnung in Lexware stellen. Beim nächsten Abgleich wandert der Auftrag automatisch auf „Rechnung“.</p><div class="list mt">${l.map(orderRow).join("") || '<p class="muted">Alles abgerechnet.</p>'}</div>`;
   }
   return `<div class="head"><div class="eyebrow">${active.length} im Fokus · ${resting.length} warten</div><h1>Aufträge<span class="dot">.</span></h1></div>
   ${tab === "aktiv" || tab === "kulissen" ? `<div class="tabsw" role="tablist"><button role="tab" aria-selected="${tab === "aktiv"}" data-tab="aktiv">Aufträge</button><button role="tab" aria-selected="${tab === "kulissen"}" data-tab="kulissen">Hinter den Kulissen</button></div>` : ""}
