@@ -1,5 +1,5 @@
 // Fokus Service Worker: hält die App-Hülle bereit, Daten kommen immer frisch vom Server.
-const CACHE = "fokus-v2";
+const CACHE = "fokus-v3";
 const SHELL = ["/", "/index.html", "/app.css", "/app.js", "/manifest.webmanifest",
   "/icons/icon-192.png", "/fonts/montserrat-latin-400-normal.woff2", "/fonts/montserrat-latin-700-normal.woff2",
   "/fonts/montserrat-latin-800-normal.woff2"];

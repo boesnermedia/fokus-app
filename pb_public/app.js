@@ -15,7 +15,7 @@ const store = {
 
 const S = {
   token: store.get("token", ""), me: store.get("me", null),
-  auftraege: [], aufgaben: [], eingang: [], rechnungen: [], starts: 0,
+  auftraege: [], aufgaben: [], eingang: [], rechnungen: [], routinen: [], kennzahlen: null, starts: 0,
   loaded: false, skip: new Set(), timer: null, showMore: false,
 };
 
@@ -46,14 +46,16 @@ const logEvent = (typ, aufgabe, info) => create("ereignisse", { typ, aufgabe: au
 async function load() {
   const monday = new Date(); monday.setHours(0, 0, 0, 0); monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7));
   const since = monday.toISOString().replace("T", " ");
-  const [a, t, e, st, re] = await Promise.all([
+  const [a, t, e, st, re, ro, kz] = await Promise.all([
     listAll("auftraege", "archiv = false", "-updated"),
     listAll("aufgaben", "status = 'offen'", "-updated"),
     listAll("eingang", "status = 'neu'", "created"),
     api(`${col("ereignisse")}?${new URLSearchParams({ perPage: "1", filter: `typ = 'start' && created >= '${since}'` })}`),
-    listAll("rechnungen", "status = 'offen'", "datum").catch(() => []),
+    listAll("rechnungen", "status = 'offen' || hinweis != ''", "datum").catch(() => []),
+    listAll("routinen", "id != ''", "created").catch(() => []),
+    listAll("kennzahlen", "id != ''", "-updated").catch(() => []),
   ]);
-  S.auftraege = a; S.aufgaben = t; S.eingang = e; S.starts = st.totalItems; S.rechnungen = re; S.loaded = true;
+  S.auftraege = a; S.aufgaben = t; S.eingang = e; S.starts = st.totalItems; S.rechnungen = re; S.routinen = ro; S.kennzahlen = kz[0] || null; S.loaded = true;
 }
 
 function patchLocal(list, rec) {
@@ -197,80 +199,168 @@ function vAside() {
   <div class="two"><button class="btn ghost" data-inbox="drop" data-id="${esc(c.id)}">Weg</button><button class="btn" data-inbox="take" data-id="${esc(c.id)}">Übernehmen</button></div></div>`).join("") : `<p class="small muted">Alles entschieden. Neues kommt erst, wenn es dran ist.</p>`}`;
 }
 
-function phaseBar(a) { return `<div class="phases" role="img" aria-label="${esc(PHASES[a.phase || 0])}">${PHASES.map((_, i) => `<i class="${i < (a.phase || 0) ? "done" : i === (a.phase || 0) ? "now" : ""}"></i>`).join("")}</div>`; }
+const PHASES_H = ["Idee", "Geplant", "In Arbeit", "Fertig"];
+const phasesOf = (a) => (a.typ === "hintergrund" ? PHASES_H : PHASES);
+const phaseName = (a) => (a.storniert ? "Storniert" : phasesOf(a)[a.phase || 0]);
+function phaseBar(a) { const ph = phasesOf(a); return `<div class="phases" style="grid-template-columns:repeat(${ph.length},minmax(0,1fr))" role="img" aria-label="${esc(phaseName(a))}">${ph.map((_, i) => `<i class="${i < (a.phase || 0) ? "done" : i === (a.phase || 0) ? "now" : ""}"></i>`).join("")}</div>`; }
 function orderRow(a) {
   const open = S.aufgaben.filter((t) => t.auftrag === a.id);
   const next = open.sort((x, y) => score(y) - score(x))[0];
-  return `<a class="item" href="#auftrag/${esc(a.id)}"><div class="top"><span class="t">${esc(a.name)}</span><span class="eyebrow plain">${esc(a.kunde || "")}</span></div>${phaseBar(a)}
-  <span class="small muted">${esc(PHASES[a.phase || 0])}${next ? ` · <span style="color:#fff">${esc(next.step || next.titel)}</span>` : a.ruht ? " · ruht" : ""}</span></a>`;
+  return `<a class="item" href="#auftrag/${esc(a.id)}"><div class="top"><span class="t">${esc(a.name)}</span><span class="eyebrow plain">${esc(a.typ === "hintergrund" ? "" : a.kunde || "")}</span></div>${phaseBar(a)}
+  <span class="small muted">${esc(phaseName(a))}${next ? ` · <span style="color:#fff">${esc(next.step || next.titel)}</span>` : a.wartet ? " · wartet auf " + esc(a.wartet) : a.ruht ? " · ruht" : ""}</span></a>`;
+}
+const RHYTHMUS = { taeglich: "täglich (Mo–Fr)", woechentlich: "wöchentlich", monatlich: "monatlich" };
+const WTAG = ["", "Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"];
+function routineWhen(r) {
+  if (r.rhythmus === "woechentlich") return WTAG[r.wochentag || 1];
+  if (r.rhythmus === "monatlich") return r.monatsregel === "erster_montag" ? "1. Montag" : r.monatsregel === "letzte_woche" ? "letzte Woche" : `am ${r.monatstag}.`;
+  return "morgens";
 }
 function vAuftraege(view) {
   const tab = view || "aktiv";
-  const all = S.auftraege;
+  const all = S.auftraege.filter((a) => a.typ !== "hintergrund" && !a.storniert);
   const working = all.filter((a) => (a.phase || 0) <= 3);
   const hasTask = (a) => S.aufgaben.some((t) => t.auftrag === a.id);
   // Aufgeräumt: höchstens 4 aktive Aufträge zeigen, sortiert nach ihrer dringendsten Aufgabe.
   const best = (a) => Math.max(...S.aufgaben.filter((t) => t.auftrag === a.id).map(score), -99);
   const active = working.filter((a) => !a.ruht && hasTask(a)).sort((x, y) => best(y) - best(x)).slice(0, 4);
   const resting = working.filter((a) => !active.includes(a));
-  // Fertig ohne Rechnung: Phase „Fertig“ und keine (End-)Rechnung aus Lexware verknüpft.
   const isTeil = (r) => /teilrechnung|abschlag/i.test(r.titel || "");
   const billed = new Set(S.rechnungen.filter((r) => r.auftrag && !isTeil(r)).map((r) => r.auftrag));
-  const fertig = all.filter((a) => a.phase === 4 && !billed.has(a.id));
-  const offene = S.rechnungen;
+  const fertig = all.filter((a) => a.phase === 4 && !a.ruht && !billed.has(a.id));
+  const offene = S.rechnungen.filter((r) => r.status === "offen");
   const summe = offene.reduce((x, r) => x + (r.offen || 0), 0);
   const alt = offene.filter((r) => (days(r.datum) ?? 0) <= -30);
-  const stand = offene.map((r) => r.abgeglichen).sort().pop();
-  const bm = S.aufgaben.filter((t) => t.art === "bm" && !t.auftrag).sort((a, b) => score(b) - score(a));
-  let body = "";
+  const stand = S.rechnungen.map((r) => r.abgeglichen).sort().pop();
+  const bg = S.auftraege.filter((a) => a.typ === "hintergrund" && !a.archiv).sort((a, b) => (b.phase === 2) - (a.phase === 2) || (b.phase || 0) - (a.phase || 0));
+  let body = "", title = "Projekte", eyebrow = `${active.length} im Fokus · ${resting.length} warten`;
   if (tab === "aktiv") {
     body = `${fertig.length ? `<button class="money mt" data-tab="fertig"><span class="num">${fertig.length}</span><span style="flex:1"><b>Fertig, aber noch keine Rechnung.</b><br><span class="small">Antippen für die Liste.</span></span><svg viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg></button>` : ""}
     ${offene.length ? `<button class="money mt" data-tab="rechnungen" style="background:var(--n800)"><span class="num">${offene.length}</span><span style="flex:1"><b>Rechnungen offen · ${euro(summe)}</b><br><span class="small">${alt.length ? `${alt.length} davon seit über 30 Tagen` : "Keine älter als 30 Tage"}${stand ? " · Stand Lexware " + new Date(stand).toLocaleDateString("de-DE") : ""}</span></span><svg viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg></button>` : ""}
     <div class="list mt">${active.map(orderRow).join("") || '<p class="muted">Gerade nichts Aktives.</p>'}</div>
     ${resting.length ? `<button class="link mt" data-more>${S.showMore ? "Weitere ausblenden" : `${resting.length} weitere Aufträge zeigen`}</button>` : ""}
     ${S.showMore ? `<div class="list" style="opacity:.7">${resting.map(orderRow).join("")}</div>` : ""}`;
-  } else if (tab === "kulissen") {
-    const top = bm.slice(0, 5), rest = bm.slice(5);
-    const row = (t) => `<a class="item" href="#aufgabe/${esc(t.id)}"><div class="top"><span class="t">${esc(t.titel)}</span><span class="small muted">${esc(label(t))}</span></div><span class="small muted">→ ${esc(t.step || "erster Schritt fehlt")}</span></a>`;
-    body = `<div class="list mt">${top.map(row).join("") || '<p class="muted">Nichts hinter den Kulissen.</p>'}</div>
-    ${rest.length ? `<button class="link mt" data-more>${S.showMore ? "Weniger zeigen" : `${rest.length} weitere zeigen`}</button>` : ""}
-    ${S.showMore ? `<div class="list" style="opacity:.7">${rest.map(row).join("")}</div>` : ""}`;
+  } else if (tab === "hintergrund") {
+    const focus = bg.filter((a) => a.phase === 2), rest = bg.filter((a) => a.phase !== 2);
+    eyebrow = `${focus.length} in Arbeit · ${rest.length} geplant oder Idee`;
+    body = `<p class="small muted">Projekte, mit denen du das Unternehmen weiterentwickelst.</p><div class="list mt">${focus.map(orderRow).join("") || '<p class="muted">Gerade nichts in Arbeit.</p>'}</div>
+    ${rest.length ? `<button class="link mt" data-more>${S.showMore ? "Weniger zeigen" : `${rest.length} Ideen und geplante zeigen`}</button>` : ""}
+    ${S.showMore ? `<div class="list" style="opacity:.7">${rest.map(orderRow).join("")}</div>` : ""}`;
+  } else if (tab === "routinen") {
+    const rs = S.routinen;
+    const perWeek = rs.filter((r) => r.aktiv).reduce((x, r) => x + (r.dauer || 0) * (r.rhythmus === "taeglich" ? 5 : r.rhythmus === "woechentlich" ? 1 : 1 / 4.3), 0);
+    eyebrow = `${rs.filter((r) => r.aktiv).length} aktiv · ca. ${perWeek.toFixed(1).replace(".", ",")} Std. pro Woche`;
+    body = `<p class="small muted">Wiederkehrende Aufgaben. Sie tauchen am Tag ihrer Fälligkeit in „Jetzt“ auf.</p>
+    <div class="list mt">${rs.map((r) => `<div class="check"><input type="checkbox" aria-label="Aktiv" data-routine="${esc(r.id)}" ${r.aktiv ? "checked" : ""}><span style="flex:1"><b>${esc(r.titel)}</b><br><span class="small muted">${esc(RHYTHMUS[r.rhythmus] || "")} · ${esc(routineWhen(r))} · ${String(r.dauer || 0).replace(".", ",")} Std.</span></span></div>`).join("") || '<p class="muted">Noch keine Routinen.</p>'}</div>
+    <form id="routineForm" class="mt2"><h3>Neue Routine</h3>
+      <label for="rTitel">Was?</label><input id="rTitel" required>
+      <div class="two"><div><label for="rRh">Rhythmus</label><select id="rRh"><option value="taeglich">täglich (Mo–Fr)</option><option value="woechentlich" selected>wöchentlich</option><option value="monatlich">monatlich</option></select></div>
+      <div><label for="rWt">Wochentag / Monatstag</label><select id="rWt">${WTAG.slice(1, 6).map((w, i) => `<option value="${i + 1}">${w}</option>`).join("")}<option value="m1">1. Montag im Monat</option><option value="mL">letzte Woche im Monat</option></select></div></div>
+      <div class="two"><div><label for="rDauer">Dauer (Std.)</label><input id="rDauer" type="number" step="0.25" min="0.25" value="0.5"></div><div><label for="rStep">Erster Schritt</label><input id="rStep"></div></div>
+      <button class="btn full mt" type="submit">Routine anlegen</button></form>`;
   } else if (tab === "rechnungen") {
+    title = "Rechnungen";
     body = `<button class="link" data-tab="aktiv">← Zurück</button><h2 class="mt">Offene Rechnungen<span class="dot">.</span></h2>
     <p class="small muted">Aus Lexware${stand ? ", Stand " + new Date(stand).toLocaleString("de-DE", { dateStyle: "short", timeStyle: "short" }) : ""}. Nach 30 Tagen ohne Zahlung legt die App eine Aufgabe an.</p>
     <div class="list mt">${offene.map((r) => { const age = -(days(r.datum) ?? 0); const a = S.auftraege.find((x) => x.id === r.auftrag);
       return `<a class="item" href="${a ? `#auftrag/${esc(a.id)}` : "#auftraege/rechnungen"}"><div class="top"><span class="t">${esc(r.nr)} · ${esc(r.kunde || "")}</span><span style="white-space:nowrap;font-weight:700">${euro(r.offen)}</span></div>
       <span class="small ${age >= 30 ? "" : "muted"}" ${age >= 30 ? 'style="color:var(--m400)"' : ""}>vom ${esc(new Date(r.datum).toLocaleDateString("de-DE"))} · seit ${age} ${age === 1 ? "Tag" : "Tagen"} offen${a ? " · " + esc(a.name) : ""}</span>${r.hinweis ? `<span class="small muted">${esc(r.hinweis)}</span>` : ""}</a>`; }).join("") || '<p class="muted">Keine offenen Rechnungen.</p>'}</div>`;
   } else {
-    const l = fertig;
+    title = "Abrechnen";
     body = `<button class="link" data-tab="aktiv">← Zurück</button><h2 class="mt">Fertig, noch keine Rechnung<span class="dot">.</span></h2>
-    <p class="small muted">Rechnung in Lexware stellen. Beim nächsten Abgleich wandert der Auftrag automatisch auf „Rechnung“.</p><div class="list mt">${l.map(orderRow).join("") || '<p class="muted">Alles abgerechnet.</p>'}</div>`;
+    <p class="small muted">Rechnung in Lexware stellen. Beim nächsten Abgleich wandert der Auftrag automatisch auf „Rechnung“.</p><div class="list mt">${fertig.map(orderRow).join("") || '<p class="muted">Alles abgerechnet.</p>'}</div>`;
   }
-  return `<div class="head"><div class="eyebrow">${active.length} im Fokus · ${resting.length} warten</div><h1>Aufträge<span class="dot">.</span></h1></div>
-  ${tab === "aktiv" || tab === "kulissen" ? `<div class="tabsw" role="tablist"><button role="tab" aria-selected="${tab === "aktiv"}" data-tab="aktiv">Aufträge</button><button role="tab" aria-selected="${tab === "kulissen"}" data-tab="kulissen">Hinter den Kulissen</button></div>` : ""}
+  const tabs = ["aktiv", "hintergrund", "routinen"].includes(tab);
+  return `<div class="head"><div class="eyebrow">${eyebrow}</div><h1>${title}<span class="dot">.</span></h1></div>
+  ${tabs ? `<div class="tabsw" role="tablist"><button role="tab" aria-selected="${tab === "aktiv"}" data-tab="aktiv">Kunden</button><button role="tab" aria-selected="${tab === "hintergrund"}" data-tab="hintergrund">Hintergrund</button><button role="tab" aria-selected="${tab === "routinen"}" data-tab="routinen">Routinen</button></div>` : ""}
   ${body}
-  <div class="two mt2"><a class="btn ghost" href="#neuer-auftrag">+ Auftrag</a><a class="btn ghost" href="#neu${tab === "kulissen" ? "?art=bm" : ""}">+ Aufgabe</a></div>`;
+  ${tab === "routinen" ? "" : `<div class="two mt2"><a class="btn ghost" href="#neuer-auftrag${tab === "hintergrund" ? "?typ=hintergrund" : ""}">+ Projekt</a><a class="btn ghost" href="#neu${tab === "hintergrund" ? "?art=bm" : ""}">+ Aufgabe</a></div>`}`;
 }
 
-function vAuftrag(id) {
-  const isNew = !id, a = isNew ? { name: "", kunde: "", nr: "", phase: 0, bestellnr: "", due: "", notiz: "" } : S.auftraege.find((x) => x.id === id);
-  if (!a) return `<p class="muted">Auftrag nicht gefunden.</p><a class="btn mt" href="#auftraege">Zurück</a>`;
+function vAuftrag(id, params) {
+  const isNew = !id;
+  const a = isNew ? { typ: params?.get("typ") === "hintergrund" ? "hintergrund" : "kunde", name: "", kunde: "", nr: "", phase: 0, bestellnr: "", due: "", notiz: "", stand: "", wartet: "", ziel: "", volumen: 0 } : S.auftraege.find((x) => x.id === id);
+  if (!a) return `<p class="muted">Projekt nicht gefunden.</p><a class="btn mt" href="#auftraege">Zurück</a>`;
+  const k = a.typ !== "hintergrund";
   const tasks = isNew ? [] : S.aufgaben.filter((t) => t.auftrag === a.id);
+  const ph = phasesOf(a);
   return `<button class="link" data-back>← Zurück</button>
-  <div class="head mt"><div class="eyebrow">${esc(a.kunde || "Neuer Auftrag")}${a.nr ? " · " + esc(a.nr) : ""}</div><h1>${esc(a.name || "Neuer Auftrag")}<span class="dot">.</span></h1></div>
-  ${isNew ? "" : `<div class="seg" role="group" aria-label="Phase">${PHASES.map((p, i) => `<button data-phase="${i}" aria-pressed="${i === (a.phase || 0)}">${p}</button>`).join("")}</div>
-  <h3 class="mt2">Aufgaben</h3><div class="list">${tasks.map((t) => `<div class="check"><input type="checkbox" aria-label="Erledigt" data-check="${esc(t.id)}"><a href="#aufgabe/${esc(t.id)}">${esc(t.titel)}<br><span class="small muted">→ ${esc(t.step || "erster Schritt fehlt")}</span></a></div>`).join("") || '<p class="small muted">Keine offene Aufgabe. Der Auftrag ruht.</p>'}</div>
-  <a class="link" href="#neu?auftrag=${esc(a.id)}" style="text-decoration:none;display:inline-flex;align-items:center">+ Aufgabe zu diesem Auftrag</a>`}
-  <form id="orderForm" class="mt2">
+  <div class="head mt"><div class="eyebrow">${k ? esc(a.kunde || "Kundenauftrag") : "Hintergrundprojekt"}${a.nr ? " · " + esc(a.nr) : ""}${a.storniert ? " · storniert" : ""}</div><h1>${esc(a.name || (k ? "Neuer Auftrag" : "Neues Projekt"))}<span class="dot">.</span></h1></div>
+  ${isNew ? "" : `<div class="seg" role="group" aria-label="Phase">${ph.map((p, i) => `<button data-phase="${i}" aria-pressed="${i === (a.phase || 0) && !a.storniert}">${p}</button>`).join("")}</div>
+  ${a.stand ? `<div class="step mt"><span class="eyebrow plain">Stand</span><p style="font-size:16px;line-height:26px">${esc(a.stand)}</p>${a.wartet ? `<span class="small muted">Wartet auf: ${esc(a.wartet)}</span>` : ""}</div>` : ""}
+  <h3 class="mt2">Aufgaben</h3><div class="list">${tasks.map((t) => `<div class="check"><input type="checkbox" aria-label="Erledigt" data-check="${esc(t.id)}"><a href="#aufgabe/${esc(t.id)}">${esc(t.titel)}<br><span class="small muted">→ ${esc(t.step || "erster Schritt fehlt")}${t.quelle === "prozess" ? " · aus Prozess" : ""}</span></a></div>`).join("") || '<p class="small muted">Keine offene Aufgabe.</p>'}</div>
+  <a class="link" href="#neu?auftrag=${esc(a.id)}" style="text-decoration:none;display:inline-flex;align-items:center">+ Aufgabe zu diesem Projekt</a>`}
+  <form id="orderForm" class="mt2" data-typ="${esc(a.typ || "kunde")}">
     <label for="oName">Name</label><input id="oName" value="${esc(a.name)}" required>
-    <div class="two"><div><label for="oKunde">Kunde</label><input id="oKunde" value="${esc(a.kunde)}"></div><div><label for="oNr">Auftragsnummer</label><input id="oNr" value="${esc(a.nr)}"></div></div>
-    <div class="two"><div><label for="oBest">Bestellnummer</label><input id="oBest" value="${esc(a.bestellnr)}"></div><div><label for="oDue">Deadline</label><input id="oDue" type="date" value="${esc(a.due)}"></div></div>
+    ${k ? `<div class="two"><div><label for="oKunde">Kunde</label><input id="oKunde" value="${esc(a.kunde)}"></div><div><label for="oNr">Auftragsnummer</label><input id="oNr" value="${esc(a.nr)}"></div></div>
+    <div class="two"><div><label for="oBest">Bestellnummer</label><input id="oBest" value="${esc(a.bestellnr)}"></div><div><label for="oVol">Volumen netto (€)</label><input id="oVol" type="number" step="1" value="${esc(a.volumen || "")}"></div></div>` : `<label for="oZiel">Warum (Ziel)</label><input id="oZiel" value="${esc(a.ziel)}">`}
+    <div class="two"><div><label for="oDue">Deadline</label><input id="oDue" type="date" value="${esc(a.due)}"></div><div><label for="oWartet">Wartet auf</label><input id="oWartet" value="${esc(a.wartet)}"></div></div>
+    <label for="oStand">Stand</label><textarea id="oStand">${esc(a.stand)}</textarea>
     <label for="oNotiz">Notiz</label><textarea id="oNotiz">${esc(a.notiz)}</textarea>
     ${a.mt ? `<p class="small mt"><a href="https://www.meistertask.com/app/task/${encodeURIComponent(a.mt)}" target="_blank" rel="noopener">In MeisterTask öffnen</a></p>` : ""}
-    <button class="btn full mt" type="submit">${isNew ? "Auftrag anlegen" : "Speichern"}</button>
+    <button class="btn full mt" type="submit">${isNew ? "Anlegen" : "Speichern"}</button>
   </form>
-  ${isNew ? "" : `<div class="foot"><button class="link" data-ruht>${a.ruht ? "Wieder aktiv setzen" : "Ruhen lassen"}</button><button class="link" data-archiv>Archivieren</button></div>`}`;
+  ${isNew ? "" : `<div class="foot"><button class="link" data-ruht>${a.ruht ? "Wieder aktiv setzen" : "Ruhen lassen"}</button>${k ? `<button class="link" data-storno>${a.storniert ? "Storno aufheben" : "Stornieren"}</button>` : ""}<button class="link" data-archiv>Archivieren</button></div>`}`;
 }
+
+/* ---------- Zahlen: Dashboard ---------- */
+const HOURS = { S: 1, M: 4, L: 12 };
+const taskHours = (t) => t.stunden || HOURS[t.s] || 4;
+function weekStart(d) { const x = new Date(d); x.setHours(0, 0, 0, 0); x.setDate(x.getDate() - ((x.getDay() + 6) % 7)); return x; }
+function vZahlen() {
+  const K = S.kennzahlen || {};
+  const ziel = K.umsatzziel || 120000, kmin = K.kapazitaet_min || 40, kmax = K.kapazitaet_max || 60;
+  const U = K.umsatz || {};
+  const netto = U.netto || 0, pct = Math.min(100, Math.round(netto / ziel * 100));
+  const offen = S.rechnungen.filter((r) => r.status === "offen"), offenSum = offen.reduce((x, r) => x + (r.offen || 0), 0);
+  const kunden = S.auftraege.filter((a) => a.typ !== "hintergrund" && !a.storniert && !a.archiv);
+  const isTeil = (r) => /teilrechnung|abschlag/i.test(r.titel || "");
+  const billed = new Set(S.rechnungen.filter((r) => r.auftrag && !isTeil(r)).map((r) => r.auftrag));
+  const fertig = kunden.filter((a) => a.phase === 4 && !a.ruht && !billed.has(a.id));
+  const angebote = kunden.filter((a) => a.phase === 1), anfragen = kunden.filter((a) => a.phase === 0);
+  const pipe = angebote.reduce((x, a) => x + (a.volumen || 0), 0), ohneBetrag = angebote.filter((a) => !a.volumen).length;
+  // Workload: vier Wochen ab dieser Woche
+  const w0 = weekStart(new Date());
+  const routH = S.routinen.filter((r) => r.aktiv).reduce((x, r) => x + (r.dauer || 0) * (r.rhythmus === "taeglich" ? 5 : r.rhythmus === "woechentlich" ? 1 : 1 / 4.3), 0);
+  const weeks = [0, 1, 2, 3].map((i) => {
+    const a = new Date(w0); a.setDate(a.getDate() + i * 7); const b = new Date(a); b.setDate(b.getDate() + 7);
+    const inW = (d) => d && new Date(d + "T12:00:00") >= a && new Date(d + "T12:00:00") < b;
+    const termine = (K.kalender || []).filter((e) => inW(e.datum)).reduce((x, e) => x + (e.stunden || 0), 0);
+    const aufg = S.aufgaben.filter((t) => t.quelle !== "routine" && inW(t.due || "")).reduce((x, t) => x + taskHours(t), 0);
+    return { label: i === 0 ? "Diese Woche" : i === 1 ? "Nächste Woche" : `KW ${kw(a)}`, termine, aufg, rout: routH, sum: termine + aufg + routH };
+  });
+  const backlog = S.aufgaben.filter((t) => t.quelle !== "routine" && !t.due).reduce((x, t) => x + taskHours(t), 0);
+  const scale = Math.max(kmax * 1.15, ...weeks.map((w) => w.sum));
+  const bar = (w) => `<div class="wl"><div class="wl-top"><span>${esc(w.label)}</span><b>${Math.round(w.sum)} Std.</b></div>
+    <div class="wl-bar"><i class="t" style="width:${w.termine / scale * 100}%"></i><i class="a" style="width:${w.aufg / scale * 100}%"></i><i class="r" style="width:${w.rout / scale * 100}%"></i><span class="band" style="left:${kmin / scale * 100}%;width:${(kmax - kmin) / scale * 100}%"></span></div></div>`;
+  const kEntries = Object.entries(U.kunden || {}), kSum = kEntries.reduce((x, [, v]) => x + v, 0);
+  const mEntries = Object.entries(U.monate || {}), mMax = Math.max(1, ...mEntries.map(([, v]) => v));
+  const monate = ["Jan", "Feb", "Mär", "Apr", "Mai", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Dez"];
+  const stand = K.stand ? new Date(K.stand).toLocaleDateString("de-DE") : "–";
+  return `<div class="head"><div class="eyebrow">Stand ${esc(stand)}</div><h1>Zahlen<span class="dot">.</span></h1></div>
+  <section class="kpis">
+    <div class="kpi big"><span class="eyebrow plain">Umsatz ${esc(U.jahr || "")} (netto)</span><div class="num">${euro(netto)}</div>
+      <div class="bar" style="margin-top:12px"><i style="width:${pct}%"></i></div>
+      <span class="small muted">${pct} % vom Ziel ${euro(ziel)} · dafür ${euro(ziel / 12)} pro Monat</span></div>
+    <a class="kpi" href="#auftraege/rechnungen"><span class="eyebrow plain">Offene Posten</span><div class="num">${euro(offenSum)}</div><span class="small muted">${offen.length} Rechnungen</span></a>
+    <a class="kpi" href="#auftraege/fertig"><span class="eyebrow plain">Fertig, ohne Rechnung</span><div class="num">${fertig.length}</div><span class="small muted">${fertig.map((a) => esc(a.name)).slice(0, 2).join(", ") || "alles abgerechnet"}</span></a>
+    <div class="kpi"><span class="eyebrow plain">Angebots-Pipeline</span><div class="num">${angebote.length}</div><span class="small muted">${pipe ? euro(pipe) + " netto" : ""}${ohneBetrag ? `${pipe ? " · " : ""}${ohneBetrag} ohne Betrag` : ""} · ${anfragen.length} Anfragen</span></div>
+  </section>
+  <h2 class="mt2">Auslastung<span class="dot">.</span></h2>
+  <p class="small muted">Termine aus dem Kalender, fällige Aufgaben und Routinen, gemessen an deiner Kapazität von ${kmin}–${kmax} Std. (helles Band).</p>
+  <div class="mt">${weeks.map(bar).join("")}</div>
+  <p class="small muted mt"><i class="lg t"></i> Termine <i class="lg a"></i> Aufgaben mit Termin <i class="lg r"></i> Routinen · Dazu ${Math.round(backlog)} Std. offene Aufgaben ohne Termin, das sind etwa ${(backlog / ((kmin + kmax) / 2)).toFixed(1).replace(".", ",")} Wochen.</p>
+  <h2 class="mt2">Umsatz nach Monat<span class="dot">.</span></h2>
+  <div class="months mt">${monate.map((m, i) => { const key = `${U.jahr}-${String(i + 1).padStart(2, "0")}`; const v = (U.monate || {})[key] || 0; return `<div class="mo"><div class="mo-col"><i style="height:${v / mMax * 100}%"></i></div><span>${m}</span></div>`; }).join("")}</div>
+  <p class="small muted mt">${esc(U.monate_quelle || "")}</p>
+  <h2 class="mt2">Kundenmix<span class="dot">.</span></h2>
+  <div class="list mt">${kEntries.map(([name, v]) => `<div class="mix"><div class="top"><span>${esc(name)}</span><b>${Math.round(v / kSum * 100)} %</b></div><div class="bar"><i style="width:${v / kSum * 100}%"></i></div></div>`).join("") || '<p class="muted">Noch keine Daten.</p>'}</div>
+  <p class="small muted mt">${esc(U.kunden_quelle || "")}${kEntries.length && kEntries[0][1] / kSum > 0.6 ? ` · ${esc(kEntries[0][0])} macht über 60 % aus: hier liegt dein größtes Abhängigkeitsrisiko.` : ""}</p>
+  <details class="mt2"><summary class="link">Ziel und Kapazität ändern</summary>
+    <form id="kpiForm" class="mt"><div class="two"><div><label for="kZiel">Umsatzziel (€)</label><input id="kZiel" type="number" value="${ziel}"></div><div><label for="kMin">Kapazität min / max (Std.)</label><div class="two"><input id="kMin" type="number" value="${kmin}"><input id="kMax" type="number" value="${kmax}"></div></div></div><button class="btn full mt" type="submit">Speichern</button></form>
+  </details>`;
+}
+function kw(d) { const t = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate())); const n = t.getUTCDay() || 7; t.setUTCDate(t.getUTCDate() + 4 - n); const y = new Date(Date.UTC(t.getUTCFullYear(), 0, 1)); return Math.ceil(((t - y) / 864e5 + 1) / 7); }
 
 function vAufgabe(id, params) {
   const isNew = !id;
@@ -318,7 +408,7 @@ async function render() {
   if (!name || name === "login") name = !energy() && hour() < 14 ? "checkin" : "jetzt";
   const views = {
     checkin: () => vCheckin(), jetzt: () => vJetzt(), fokus: () => vFokus(r.arg), eingang: () => vEingang(),
-    auftraege: () => vAuftraege(r.arg), auftrag: () => vAuftrag(r.arg), "neuer-auftrag": () => vAuftrag(""),
+    auftraege: () => vAuftraege(r.arg), auftrag: () => vAuftrag(r.arg), "neuer-auftrag": () => vAuftrag("", r.params), zahlen: () => vZahlen(),
     aufgabe: () => vAufgabe(r.arg, r.params), neu: () => vAufgabe("", r.params),
   };
   main.innerHTML = (views[name] || views.jetzt)();
@@ -439,17 +529,21 @@ document.addEventListener("click", async (e) => {
   if (d.strike) { await update("aufgaben", d.strike, { status: "gestrichen" }); S.aufgaben = S.aufgaben.filter((t) => t.id !== d.strike); location.hash = "#jetzt"; return; }
   if (d.inbox) { inbox(d.id, d.inbox === "take"); return; }
   if (d.phase !== undefined && route().name === "auftrag") {
-    const rec = await update("auftraege", route().arg, { phase: +d.phase }); patchLocal("auftraege", rec); toast(`Phase: ${PHASES[+d.phase]}`);
-    if (+d.phase === 6) { await update("auftraege", rec.id, { archiv: true }); S.auftraege = S.auftraege.filter((a) => a.id !== rec.id); toast("Bezahlt und archiviert."); location.hash = "#auftraege"; return; }
+    const rec = await update("auftraege", route().arg, { phase: +d.phase, storniert: false }); patchLocal("auftraege", rec); toast(`Phase: ${phasesOf(rec)[+d.phase]}`);
+    if (rec.typ !== "hintergrund") { try { S.aufgaben = await listAll("aufgaben", "status = 'offen'", "-updated"); } catch {} }
+    if (rec.typ !== "hintergrund" && +d.phase === 6) { await update("auftraege", rec.id, { archiv: true }); S.auftraege = S.auftraege.filter((a) => a.id !== rec.id); toast("Bezahlt und archiviert."); location.hash = "#auftraege"; return; }
     render(); return;
   }
   if ("ruht" in d) { const a = S.auftraege.find((x) => x.id === route().arg); const rec = await update("auftraege", a.id, { ruht: !a.ruht }); patchLocal("auftraege", rec); render(); return; }
+  if ("storno" in d) { const a = S.auftraege.find((x) => x.id === route().arg); const rec = await update("auftraege", a.id, { storniert: !a.storniert }); patchLocal("auftraege", rec); toast(rec.storniert ? "Storniert." : "Storno aufgehoben."); render(); return; }
   if ("archiv" in d) { await update("auftraege", route().arg, { archiv: true }); S.auftraege = S.auftraege.filter((a) => a.id !== route().arg); toast("Archiviert."); location.hash = "#auftraege"; return; }
   const seg = b.closest(".seg[data-f]");
   if (seg && b.dataset.v !== undefined) { const f = seg.dataset.f; S.form[f] = f === "s" || f === "art" ? b.dataset.v : +b.dataset.v; $$("button", seg).forEach((x) => x.setAttribute("aria-pressed", String(x === b))); }
 });
 
 document.addEventListener("change", async (e) => {
+  const rid = e.target.dataset?.routine;
+  if (rid) { try { const rec = await update("routinen", rid, { aktiv: e.target.checked }); const i = S.routinen.findIndex((x) => x.id === rid); if (i >= 0) S.routinen[i] = rec; toast(rec.aktiv ? "Routine aktiv." : "Routine pausiert."); } catch (err) { toast(err.message); } render(); return; }
   const id = e.target.dataset?.check; if (!id) return;
   await doneTask(id); render();
 });
@@ -472,11 +566,29 @@ document.addEventListener("submit", async (e) => {
     } catch (err) { toast(err.message); }
     return;
   }
+  if (f.id === "routineForm") {
+    e.preventDefault();
+    const wt = $("#rWt").value, rh = $("#rRh").value;
+    const data = { titel: $("#rTitel").value.trim(), rhythmus: rh, dauer: +$("#rDauer").value || 0.5, step: $("#rStep").value.trim(), aktiv: true };
+    if (rh === "woechentlich") data.wochentag = /^\d$/.test(wt) ? +wt : 1;
+    if (rh === "monatlich") data.monatsregel = wt === "m1" ? "erster_montag" : wt === "mL" ? "letzte_woche" : "tag", data.monatstag = /^\d$/.test(wt) ? +wt : 1;
+    try { const rec = await create("routinen", data); S.routinen.push(rec); toast("Routine angelegt."); render(); } catch (err) { toast(err.message); }
+    return;
+  }
+  if (f.id === "kpiForm") {
+    e.preventDefault();
+    const data = { umsatzziel: +$("#kZiel").value, kapazitaet_min: +$("#kMin").value, kapazitaet_max: +$("#kMax").value };
+    try { S.kennzahlen = S.kennzahlen ? await update("kennzahlen", S.kennzahlen.id, data) : await create("kennzahlen", data); toast("Gespeichert."); render(); } catch (err) { toast(err.message); }
+    return;
+  }
   if (f.id === "orderForm") {
     e.preventDefault();
-    const r = route(), data = { name: $("#oName").value.trim(), kunde: $("#oKunde").value.trim(), nr: $("#oNr").value.trim(), bestellnr: $("#oBest").value.trim(), due: $("#oDue").value, notiz: $("#oNotiz").value };
+    const typ = f.dataset.typ || "kunde", val = (id) => ($(id) ? $(id).value.trim() : undefined);
+    const r = route(), data = { name: val("#oName"), due: val("#oDue"), notiz: $("#oNotiz").value, stand: $("#oStand").value, wartet: val("#oWartet") };
+    if (typ === "kunde") Object.assign(data, { kunde: val("#oKunde"), nr: val("#oNr"), bestellnr: val("#oBest"), volumen: +val("#oVol") || 0 });
+    else Object.assign(data, { ziel: val("#oZiel"), kunde: "Bösner Media" });
     try {
-      if (r.name === "neuer-auftrag") { const rec = await create("auftraege", { ...data, phase: 0, archiv: false, ruht: false }); S.auftraege.unshift(rec); location.hash = `#auftrag/${rec.id}`; }
+      if (r.name === "neuer-auftrag") { const rec = await create("auftraege", { ...data, typ, phase: 0, archiv: false, ruht: false, storniert: false }); S.auftraege.unshift(rec); location.hash = `#auftrag/${rec.id}`; }
       else { const rec = await update("auftraege", r.arg, data); patchLocal("auftraege", rec); toast("Gespeichert."); render(); }
     } catch (err) { toast(err.message); }
   }
