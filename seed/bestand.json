@@ -854,7 +854,7 @@
   }
  ],
  "kennzahlen": {
-  "umsatzziel": 120000,
+  "umsatzziel": 80000,
   "kapazitaet_min": 40,
   "kapazitaet_max": 60,
   "umsatz": {
@@ -876,7 +876,11 @@
     "Optimum": 685.44,
     "Fernmarkt": 321.3
    },
-   "kunden_quelle": "Rechnungen ab April 2026 (brutto)"
+   "kunden_quelle": "Rechnungen ab April 2026 (brutto)",
+   "ziele": {
+    "2026": 80000,
+    "2027": 120000
+   }
   },
   "kalender": [
    {

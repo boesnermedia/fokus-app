@@ -280,3 +280,27 @@ routerUse((e) => {
   }
   return e.next();
 });
+
+// Datensicherung: jede Nacht ein Backup (7 werden behalten). Ist FOKUS_BACKUP_SECRET gesetzt,
+// landen die Backups in der S3-kompatiblen Bunny-Storage-Zone statt nur auf dem Volume.
+cronAdd("fokus_backup_setup", "*/5 * * * *", () => {
+  try {
+    const s = $app.settings();
+    const zone = $os.getenv("FOKUS_BACKUP_ZONE") || "fokus-backup";
+    const secret = $os.getenv("FOKUS_BACKUP_SECRET");
+    const region = $os.getenv("FOKUS_BACKUP_REGION") || "de";
+    const want = { cron: "0 2 * * *", keep: 7, s3: !!secret };
+    const b = s.backups;
+    const same = b.cron === want.cron && b.cronMaxKeep === want.keep && b.s3.enabled === want.s3 &&
+      (!want.s3 || (b.s3.bucket === zone && b.s3.secret === secret && b.s3.region === region));
+    if (same) return;
+    b.cron = want.cron; b.cronMaxKeep = want.keep;
+    if (secret) {
+      b.s3.enabled = true; b.s3.bucket = zone; b.s3.region = region;
+      b.s3.endpoint = `https://${region}-s3.storage.bunnycdn.com`;
+      b.s3.accessKey = zone; b.s3.secret = secret; b.s3.forcePathStyle = true;
+    } else { b.s3.enabled = false; }
+    $app.save(s);
+    console.log(`[fokus] Datensicherung eingerichtet: täglich, ${want.s3 ? "Bunny Storage " + zone : "lokal auf dem Volume"}`);
+  } catch (err) { console.log("[fokus] Datensicherung: " + err); }
+});

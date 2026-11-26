@@ -309,7 +309,8 @@ const taskHours = (t) => t.stunden || HOURS[t.s] || 4;
 function weekStart(d) { const x = new Date(d); x.setHours(0, 0, 0, 0); x.setDate(x.getDate() - ((x.getDay() + 6) % 7)); return x; }
 function vZahlen() {
   const K = S.kennzahlen || {};
-  const ziel = K.umsatzziel || 120000, kmin = K.kapazitaet_min || 40, kmax = K.kapazitaet_max || 60;
+  const U0 = K.umsatz || {}, zJ = String(U0.jahr || new Date().getFullYear()), zN = String(+zJ + 1);
+  const ziel = (U0.ziele || {})[zJ] || K.umsatzziel || 80000, zielN = (U0.ziele || {})[zN] || 0, kmin = K.kapazitaet_min || 40, kmax = K.kapazitaet_max || 60;
   const U = K.umsatz || {};
   const netto = U.netto || 0, pct = Math.min(100, Math.round(netto / ziel * 100));
   const offen = S.rechnungen.filter((r) => r.status === "offen"), offenSum = offen.reduce((x, r) => x + (r.offen || 0), 0);
@@ -341,7 +342,7 @@ function vZahlen() {
   <section class="kpis">
     <div class="kpi big"><span class="eyebrow plain">Umsatz ${esc(U.jahr || "")} (netto)</span><div class="num">${euro(netto)}</div>
       <div class="bar" style="margin-top:12px"><i style="width:${pct}%"></i></div>
-      <span class="small muted">${pct} % vom Ziel ${euro(ziel)} · dafür ${euro(ziel / 12)} pro Monat</span></div>
+      <span class="small muted">${pct} % vom Ziel ${euro(ziel)} · ${netto >= ziel ? "Ziel erreicht" : `noch ${euro(ziel - netto)} bis Jahresende`}${zielN ? ` · Ziel ${zN}: ${euro(zielN)}` : ""}</span></div>
     <a class="kpi" href="#auftraege/rechnungen"><span class="eyebrow plain">Offene Posten</span><div class="num">${euro(offenSum)}</div><span class="small muted">${offen.length} Rechnungen</span></a>
     <a class="kpi" href="#auftraege/fertig"><span class="eyebrow plain">Fertig, ohne Rechnung</span><div class="num">${fertig.length}</div><span class="small muted">${fertig.map((a) => esc(a.name)).slice(0, 2).join(", ") || "alles abgerechnet"}</span></a>
     <div class="kpi"><span class="eyebrow plain">Angebots-Pipeline</span><div class="num">${angebote.length}</div><span class="small muted">${pipe ? euro(pipe) + " netto" : ""}${ohneBetrag ? `${pipe ? " · " : ""}${ohneBetrag} ohne Betrag` : ""} · ${anfragen.length} Anfragen</span></div>
@@ -357,7 +358,7 @@ function vZahlen() {
   <div class="list mt">${kEntries.map(([name, v]) => `<div class="mix"><div class="top"><span>${esc(name)}</span><b>${Math.round(v / kSum * 100)} %</b></div><div class="bar"><i style="width:${v / kSum * 100}%"></i></div></div>`).join("") || '<p class="muted">Noch keine Daten.</p>'}</div>
   <p class="small muted mt">${esc(U.kunden_quelle || "")}${kEntries.length && kEntries[0][1] / kSum > 0.6 ? ` · ${esc(kEntries[0][0])} macht über 60 % aus: hier liegt dein größtes Abhängigkeitsrisiko.` : ""}</p>
   <details class="mt2"><summary class="link">Ziel und Kapazität ändern</summary>
-    <form id="kpiForm" class="mt"><div class="two"><div><label for="kZiel">Umsatzziel (€)</label><input id="kZiel" type="number" value="${ziel}"></div><div><label for="kMin">Kapazität min / max (Std.)</label><div class="two"><input id="kMin" type="number" value="${kmin}"><input id="kMax" type="number" value="${kmax}"></div></div></div><button class="btn full mt" type="submit">Speichern</button></form>
+    <form id="kpiForm" class="mt"><div class="two"><div><label for="kZiel">Umsatzziel ${zJ} / ${zN} (€)</label><div class="two"><input id="kZiel" type="number" value="${ziel}" data-jahr="${zJ}"><input id="kZielN" type="number" value="${zielN || ""}" data-jahr="${zN}"></div></div><div><label for="kMin">Kapazität min / max (Std.)</label><div class="two"><input id="kMin" type="number" value="${kmin}"><input id="kMax" type="number" value="${kmax}"></div></div></div><button class="btn full mt" type="submit">Speichern</button></form>
   </details>`;
 }
 function kw(d) { const t = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate())); const n = t.getUTCDay() || 7; t.setUTCDate(t.getUTCDate() + 4 - n); const y = new Date(Date.UTC(t.getUTCFullYear(), 0, 1)); return Math.ceil(((t - y) / 864e5 + 1) / 7); }
@@ -577,7 +578,8 @@ document.addEventListener("submit", async (e) => {
   }
   if (f.id === "kpiForm") {
     e.preventDefault();
-    const data = { umsatzziel: +$("#kZiel").value, kapazitaet_min: +$("#kMin").value, kapazitaet_max: +$("#kMax").value };
+    const u = { ...((S.kennzahlen || {}).umsatz || {}) }; u.ziele = { ...(u.ziele || {}), [$("#kZiel").dataset.jahr]: +$("#kZiel").value, [$("#kZielN").dataset.jahr]: +$("#kZielN").value || 0 };
+    const data = { umsatzziel: +$("#kZiel").value, umsatz: u, kapazitaet_min: +$("#kMin").value, kapazitaet_max: +$("#kMax").value };
     try { S.kennzahlen = S.kennzahlen ? await update("kennzahlen", S.kennzahlen.id, data) : await create("kennzahlen", data); toast("Gespeichert."); render(); } catch (err) { toast(err.message); }
     return;
   }
