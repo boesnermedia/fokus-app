@@ -286,7 +286,7 @@ routerUse((e) => {
 cronAdd("fokus_backup_setup", "*/5 * * * *", () => {
   try {
     const s = $app.settings();
-    const zone = $os.getenv("FOKUS_BACKUP_ZONE") || "fokus-backup";
+    const zone = $os.getenv("FOKUS_BACKUP_ZONE") || "boesnermedia-fokus-backup";
     const secret = $os.getenv("FOKUS_BACKUP_SECRET");
     const region = $os.getenv("FOKUS_BACKUP_REGION") || "de";
     const want = { cron: "0 2 * * *", keep: 7, s3: !!secret };
