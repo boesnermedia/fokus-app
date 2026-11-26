@@ -479,12 +479,12 @@ async function inbox(id, take) {
       let auftrag = d.auftrag_id || "";
       if (!auftrag && d.auftrag_nr) auftrag = S.auftraege.find((a) => a.nr === d.auftrag_nr)?.id || "";
       if (c.typ === "auftrag") {
-        const a = await create("auftraege", { name: d.name || c.titel, kunde: d.kunde || "", nr: d.nr || "", phase: d.phase || 0, due: d.due || "", notiz: d.notiz || c.text || "", gmail: d.gmail || "", archiv: false, ruht: false });
+        const a = await create("auftraege", { name: d.name || c.titel, kunde: d.kunde || "", nr: d.nr || "", phase: d.phase || 0, due: d.due || "", notiz: d.notiz || c.text || "", gmail: d.gmail || "", typ: "kunde", storniert: false, archiv: false, ruht: false });
         S.auftraege.unshift(a); auftrag = a.id;
       }
       const tk = d.aufgabe || (c.typ === "aufgabe" ? d : null);
       if (tk) {
-        const rec = await create("aufgaben", { titel: tk.titel || c.titel, art: tk.art || (auftrag ? "kunde" : "bm"), auftrag, w: tk.w ?? 2, v: tk.v ?? 2, s: tk.s || "S", r: tk.r ?? 1, step: tk.step || "", due: tk.due || "", notiz: tk.notiz || "", src: c.src || "", status: "offen", post: 0, starts: 0 });
+        const rec = await create("aufgaben", { titel: tk.titel || c.titel, art: tk.art || (auftrag ? "kunde" : "bm"), auftrag, w: tk.w ?? 2, v: tk.v ?? 2, s: tk.s || "S", r: tk.r ?? 1, step: tk.step || "", due: tk.due || "", notiz: tk.notiz || "", src: c.src || "", quelle: c.src ? "mail" : "manuell", status: "offen", post: 0, starts: 0 });
         S.aufgaben.unshift(rec);
       }
     }
