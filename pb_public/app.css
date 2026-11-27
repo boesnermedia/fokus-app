@@ -139,3 +139,19 @@ textarea{min-height:96px;resize:vertical}
 .mo-col{height:120px;width:100%;background:var(--n800);display:flex;align-items:flex-end}.mo-col i{display:block;width:100%;background:var(--m500)}
 .mix{display:flex;flex-direction:column;gap:6px;padding:10px 0;border-top:1px solid var(--border)}.mix .top{display:flex;justify-content:space-between}
 details summary{cursor:pointer;list-style:none}
+/* Schritte & Kommentare */
+.steps{list-style:none;margin:4px 0 0;padding:0;display:flex;flex-direction:column}
+.steps li{display:flex;align-items:flex-start;gap:12px;padding:10px 0;border-top:1px solid var(--border)}
+.steps li:first-child{border-top:0}
+.steps input{width:22px;height:22px;min-height:0;margin-top:3px;accent-color:var(--m500);flex:none}
+.steps li>span{display:flex;flex-direction:column;gap:2px}
+.steps li.now .st{font-size:18px;line-height:28px;font-weight:500}
+.steps li.done .st{text-decoration:line-through;opacity:.5}
+.steps li.later .st{opacity:.6}
+.addstep{display:flex;gap:8px;margin-top:8px}
+.addstep .btn{flex:none;width:auto;padding:0 16px}
+.komm{border-top:1px solid var(--rule);padding-top:16px;margin-top:16px;display:flex;flex-direction:column;gap:8px}
+.km{background:var(--n800);padding:10px 12px;border-left:3px solid var(--border)}
+.km.cl{border-left-color:var(--m500)}
+.km p{font-size:15px;line-height:22px;white-space:pre-wrap}
+.komm textarea{min-height:64px}

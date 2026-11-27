@@ -106,6 +106,46 @@ const euro = (n) => (n || 0).toLocaleString("de-DE", { style: "currency", curren
 const minutes = (t) => (t.s === "S" ? 10 : 15);
 const title = (t) => { const a = auftragOf(t); return a && !t.titel.toLowerCase().includes((a.kunde || "").toLowerCase()) ? `${t.titel}` : t.titel; };
 
+/* ---------- Schritte & Kommentare ---------- */
+const stepsOf = (t) => (Array.isArray(t.schritte) ? t.schritte : []);
+const commentsOf = (t) => (Array.isArray(t.kommentare) ? t.kommentare : []);
+const waiting = (t) => commentsOf(t).filter((c) => c.von !== "claude" && c.offen).length;
+const fmtAt = (iso) => { try { return new Date(iso).toLocaleString("de-DE", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }); } catch { return ""; } };
+async function saveSteps(id, schritte) {
+  const cur = schritte.find((s) => !s.done);
+  const rec = await update("aufgaben", id, { schritte, step: cur ? cur.t : "" });
+  patchLocal("aufgaben", rec);
+  return rec;
+}
+// Alte Aufgaben ohne Liste: der bisherige erste Schritt wird zum ersten Listeneintrag.
+const ensureSteps = (t) => (stepsOf(t).length ? stepsOf(t).map((s) => ({ ...s })) : t.step ? [{ t: t.step, done: false }] : []);
+function stepsBlock(t, opts = {}) {
+  const list = stepsOf(t);
+  if (!list.length) return `<div class="step"><span class="eyebrow plain">Erster Schritt · ${minutes(t)} Min</span><p>${t.step ? esc(t.step) : '<span class="muted">Noch kein erster Schritt.</span>'}</p>${opts.edit ? addStepForm(t) : ""}</div>`;
+  const cur = list.findIndex((s) => !s.done), done = list.filter((s) => s.done).length;
+  const items = list.map((s, i) => {
+    const now = i === cur, cls = s.done ? "done" : now ? "now" : "later";
+    // In „Jetzt“ nur den zuletzt erledigten, den aktuellen und zwei kommende Schritte zeigen.
+    if (!opts.edit && ((!s.done && !now && i > cur + 2) || (s.done && cur >= 0 && i < cur - 1))) return "";
+    return `<li class="${cls}"><input type="checkbox" aria-label="Schritt erledigt" data-stepcheck="${i}" data-id="${esc(t.id)}" ${s.done ? "checked" : ""}><span>${now ? `<span class="eyebrow plain brand">Jetzt dran · ${minutes(t)} Min</span>` : ""}<span class="st">${esc(s.t)}</span></span></li>`;
+  }).join("");
+  const hidden = !opts.edit && cur >= 0 ? list.length - (cur + 3) : 0;
+  return `<div class="step"><span class="eyebrow plain">Schritte · ${done} von ${list.length} erledigt</span><ol class="steps">${items}</ol>
+  ${hidden > 0 ? `<span class="small muted">… und ${hidden} weitere</span>` : ""}
+  ${cur < 0 ? `<p class="small">Alle Schritte erledigt. <button class="link" data-done="${esc(t.id)}">Aufgabe abschließen</button></p>` : ""}
+  ${opts.edit ? addStepForm(t) : ""}</div>`;
+}
+const addStepForm = (t) => `<form id="addStepForm" data-id="${esc(t.id)}" class="addstep"><input id="newStep" placeholder="+ Schritt hinzufügen" aria-label="Neuer Schritt"><button class="btn ghost" type="submit">Hinzufügen</button></form>`;
+function commentBlock(t, max = 4) {
+  const all = commentsOf(t), list = all.slice(-max);
+  return `<div class="komm"><span class="eyebrow plain">Kommentar an Claude</span>
+  ${all.length > max ? `<a class="small" href="#aufgabe/${esc(t.id)}">${all.length - max} ältere ansehen</a>` : ""}
+  ${list.map((c) => `<div class="km ${c.von === "claude" ? "cl" : "me"}"><span class="small muted">${c.von === "claude" ? "Claude" : "Du"} · ${esc(fmtAt(c.at))}${c.von !== "claude" && c.offen ? ' · <b style="color:var(--m400)">wartet auf Claude</b>' : ""}</span><p>${esc(c.text)}</p></div>`).join("")}
+  <form id="commentForm" data-id="${esc(t.id)}"><textarea id="kText" rows="2" placeholder="Was hat sich geändert? Z. B. „Nummer beim BZSt beantragt, danach Brief mit korrigierten Rechnungen an Simplon“"></textarea>
+  <button class="btn ghost full" type="submit">Kommentar senden</button></form>
+  <span class="small muted">Claude liest Kommentare beim nächsten Lauf und passt Schritte, Frist und Titel an.</span></div>`;
+}
+
 /* ---------- Rahmen ---------- */
 function toast(msg) { const el = $("#toast"); el.textContent = msg; el.classList.add("on"); clearTimeout(toast.t); toast.t = setTimeout(() => el.classList.remove("on"), 2600); }
 function setNav(name) {
@@ -151,13 +191,14 @@ function vJetzt() {
   return head + `<article class="card">
     <div class="row"><span class="eyebrow plain brand">${esc(label(t))}</span><span class="small muted">${esc(context(t))}</span></div>
     <h2>${esc(title(t))}</h2>
-    <div class="step"><span class="eyebrow plain">Erster Schritt · ${minutes(t)} Min</span><p>${t.step ? esc(t.step) : '<span class="muted">Noch kein erster Schritt.</span>'}</p></div>
+    ${stepsBlock(t)}
     ${auftragOf(t) ? `<a class="small" href="#auftrag/${esc(t.auftrag)}">${esc(auftragOf(t).name)}</a>` : ""}
   </article>
   <div class="stack mt">
     <a class="btn big" href="#fokus/${esc(t.id)}">Los <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a>
     <div style="display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap"><button class="link" data-later="${esc(t.id)}">Nicht jetzt</button><a class="link" href="#aufgabe/${esc(t.id)}" style="text-decoration:none">Bearbeiten</a></div>
   </div>
+  ${commentBlock(t, 3)}
   <div class="foot">
     ${next.length ? `<button class="link" data-more>${S.showMore ? "Weniger zeigen" : `Danach heute noch ${next.length} ${next.length === 1 ? "Ding" : "Dinge"}`}</button>` : `<span class="small muted">Danach ist für heute Schluss.</span>`}
     <span class="small" style="color:var(--m400);font-weight:700">${S.starts} ${S.starts === 1 ? "Start" : "Starts"} diese Woche</span>
@@ -372,9 +413,10 @@ function vAufgabe(id, params) {
   const orders = S.auftraege.filter((a) => (a.phase || 0) <= 5);
   return `<button class="link" data-back>← Zurück</button>
   <div class="head mt"><div class="eyebrow">${isNew ? "Neu" : "Aufgabe"}</div><h1>${isNew ? "Neue Aufgabe" : esc(t.titel)}<span class="dot">.</span></h1></div>
+  ${isNew ? "" : `${stepsBlock(t, { edit: true })}${commentBlock(t, 50)}<h3 class="mt2">Details</h3>`}
   <form id="taskForm">
     <label for="tTitel">Was ist zu tun?</label><input id="tTitel" value="${esc(t.titel)}" required>
-    <label for="tStep">Erster Schritt (höchstens 15 Minuten)</label><input id="tStep" value="${esc(t.step)}" placeholder="So konkret, dass du ohne Nachdenken anfangen kannst">
+    <label for="tStep">${stepsOf(t).length ? "Aktueller Schritt" : "Erster Schritt"} (höchstens 15 Minuten)</label><input id="tStep" value="${esc(t.step)}" placeholder="So konkret, dass du ohne Nachdenken anfangen kannst">
     <label>Art</label><div class="seg" data-f="art"><button type="button" data-v="kunde" aria-pressed="${S.form.art === "kunde"}">Auftrag</button><button type="button" data-v="bm" aria-pressed="${S.form.art === "bm"}">Hinter den Kulissen</button></div>
     <label for="tAuftrag">Gehört zu Auftrag</label><select id="tAuftrag"><option value="">Kein Auftrag</option>${orders.map((a) => `<option value="${esc(a.id)}" ${a.id === t.auftrag ? "selected" : ""}>${esc(a.name)}${a.kunde ? " · " + esc(a.kunde) : ""}</option>`).join("")}</select>
     ${seg("w", [0, 1, 2, 3], "Wer wartet? (0 niemand, 3 Kunde wartet)")}
@@ -525,7 +567,16 @@ document.addEventListener("click", async (e) => {
     try { const rec = await update("aufgaben", t.id, { "post+": 1 }); patchLocal("aufgaben", rec); } catch {}
     S.skip.add(t.id); logEvent("spaeter", t.id); render(); return;
   }
-  if (d.stepdone) { const f = $("#stepForm"); f.hidden = false; $("#nextStep").focus(); return; }
+  if (d.stepdone) {
+    // Gibt es schon einen nächsten Schritt in der Liste, direkt dorthin weiter; sonst nach dem nächsten fragen.
+    const t = S.aufgaben.find((x) => x.id === d.stepdone), list = t ? ensureSteps(t) : [], i = list.findIndex((s) => !s.done);
+    if (i >= 0 && list.slice(i + 1).some((s) => !s.done)) {
+      list[i].done = true;
+      try { await update("aufgaben", t.id, { post: 0, r: Math.max(0, (t.r || 0) - 1) }); const rec = await saveSteps(t.id, list); logEvent("schritt", t.id, list[i].t); toast("Weiter: " + rec.step); } catch (err) { toast(err.message); }
+      location.hash = "#jetzt"; return;
+    }
+    const f = $("#stepForm"); f.hidden = false; $("#nextStep").focus(); return;
+  }
   if (d.done) { await doneTask(d.done); location.hash = "#jetzt"; render(); return; }
   if (d.strike) { await update("aufgaben", d.strike, { status: "gestrichen" }); S.aufgaben = S.aufgaben.filter((t) => t.id !== d.strike); location.hash = "#jetzt"; return; }
   if (d.inbox) { inbox(d.id, d.inbox === "take"); return; }
@@ -543,6 +594,14 @@ document.addEventListener("click", async (e) => {
 });
 
 document.addEventListener("change", async (e) => {
+  const si = e.target.dataset?.stepcheck;
+  if (si !== undefined) {
+    const t = S.aufgaben.find((x) => x.id === e.target.dataset.id); if (!t) return;
+    const list = ensureSteps(t); if (!list[+si]) return;
+    list[+si].done = e.target.checked;
+    try { await saveSteps(t.id, list); if (e.target.checked) logEvent("schritt", t.id, list[+si].t); } catch (err) { toast(err.message); }
+    render(); return;
+  }
   const rid = e.target.dataset?.routine;
   if (rid) { try { const rec = await update("routinen", rid, { aktiv: e.target.checked }); const i = S.routinen.findIndex((x) => x.id === rid); if (i >= 0) S.routinen[i] = rec; toast(rec.aktiv ? "Routine aktiv." : "Routine pausiert."); } catch (err) { toast(err.message); } render(); return; }
   const id = e.target.dataset?.check; if (!id) return;
@@ -554,15 +613,42 @@ document.addEventListener("submit", async (e) => {
   if (f.id === "stepForm") {
     e.preventDefault();
     const id = route().arg, t = S.aufgaben.find((x) => x.id === id), step = $("#nextStep").value.trim();
-    try { const rec = await update("aufgaben", id, { step: step || t.step, post: 0, r: Math.max(0, (t.r || 0) - 1) }); patchLocal("aufgaben", rec); logEvent("schritt", id, step); toast("Schritt gespeichert. Weiter so."); } catch (err) { toast(err.message); }
+    try {
+      const list = ensureSteps(t), cur = list.find((s) => !s.done);
+      if (cur) cur.done = true;
+      if (step) list.push({ t: step, done: false });
+      await update("aufgaben", id, { post: 0, r: Math.max(0, (t.r || 0) - 1) });
+      await saveSteps(id, list); logEvent("schritt", id, step); toast("Schritt gespeichert. Weiter so.");
+    } catch (err) { toast(err.message); }
     location.hash = "#jetzt"; return;
+  }
+  if (f.id === "addStepForm") {
+    e.preventDefault();
+    const id = f.dataset.id, t = S.aufgaben.find((x) => x.id === id), text = $("#newStep").value.trim();
+    if (!t || !text) return;
+    try { await saveSteps(id, [...ensureSteps(t), { t: text, done: false }]); toast("Schritt hinzugefügt."); render(); } catch (err) { toast(err.message); }
+    return;
+  }
+  if (f.id === "commentForm") {
+    e.preventDefault();
+    const id = f.dataset.id, t = S.aufgaben.find((x) => x.id === id), text = $("#kText").value.trim();
+    if (!t || !text) return;
+    const k = [...commentsOf(t), { id: Date.now().toString(36), text, at: new Date().toISOString(), von: "niklas", offen: true }];
+    try { const rec = await update("aufgaben", id, { kommentare: k }); patchLocal("aufgaben", rec); logEvent("kommentar", id, text.slice(0, 200)); toast("Kommentar gespeichert. Claude passt die Aufgabe an."); render(); } catch (err) { toast(err.message); }
+    return;
   }
   if (f.id === "taskForm") {
     e.preventDefault();
     const r = route(), data = { titel: $("#tTitel").value.trim(), step: $("#tStep").value.trim(), auftrag: $("#tAuftrag").value, due: $("#tDue").value, notiz: $("#tNotiz").value, ...S.form };
     try {
       if (r.name === "neu") { const rec = await create("aufgaben", { ...data, status: "offen", post: 0, starts: 0 }); S.aufgaben.unshift(rec); }
-      else { const rec = await update("aufgaben", r.arg, data); patchLocal("aufgaben", rec); }
+      else {
+        const old = S.aufgaben.find((x) => x.id === r.arg), list = old ? stepsOf(old).map((s) => ({ ...s })) : [];
+        const cur = list.find((s) => !s.done);
+        if (cur && data.step) { cur.t = data.step; data.schritte = list; }
+        else if (!cur && list.length && data.step && data.step !== old.step) { list.push({ t: data.step, done: false }); data.schritte = list; }
+        const rec = await update("aufgaben", r.arg, data); patchLocal("aufgaben", rec);
+      }
       toast("Gespeichert."); history.length > 1 ? history.back() : (location.hash = "#jetzt");
     } catch (err) { toast(err.message); }
     return;
