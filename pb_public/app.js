@@ -136,6 +136,14 @@ function stepsBlock(t, opts = {}) {
   ${opts.edit ? addStepForm(t) : ""}</div>`;
 }
 const addStepForm = (t) => `<form id="addStepForm" data-id="${esc(t.id)}" class="addstep"><input id="newStep" placeholder="+ Schritt hinzufügen" aria-label="Neuer Schritt"><button class="btn ghost" type="submit">Hinzufügen</button></form>`;
+// In „Jetzt“: nur ein kurzer Hinweis, ob ein Grund auf Claude wartet oder was Claude zuletzt geantwortet hat.
+function jetztNote(t) {
+  const last = commentsOf(t).slice(-1)[0];
+  if (!last) return "";
+  if (last.von !== "claude" && last.offen) return `<p class="small muted mt">Dein Grund „${esc(last.text)}“ wartet auf Claude.</p>`;
+  if (last.von === "claude") return `<div class="km cl mt"><span class="small muted">Claude · ${esc(fmtAt(last.at))}</span><p>${esc(last.text)}</p></div>`;
+  return "";
+}
 function commentBlock(t, max = 4) {
   const all = commentsOf(t), list = all.slice(-max);
   return `<div class="komm"><span class="eyebrow plain">Kommentar an Claude</span>
@@ -198,7 +206,7 @@ function vJetzt() {
     <a class="btn big" href="#fokus/${esc(t.id)}">Los <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a>
     <div style="display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap"><button class="link" data-later="${esc(t.id)}">Nicht jetzt</button><a class="link" href="#aufgabe/${esc(t.id)}" style="text-decoration:none">Bearbeiten</a></div>
   </div>
-  ${commentBlock(t, 3)}
+  ${jetztNote(t)}
   <div class="foot">
     ${next.length ? `<button class="link" data-more>${S.showMore ? "Weniger zeigen" : `Danach heute noch ${next.length} ${next.length === 1 ? "Ding" : "Dinge"}`}</button>` : `<span class="small muted">Danach ist für heute Schluss.</span>`}
     <span class="small" style="color:var(--m400);font-weight:700">${S.starts} ${S.starts === 1 ? "Start" : "Starts"} diese Woche</span>
@@ -498,18 +506,29 @@ async function doneTask(id) {
 }
 
 function laterSheet(t) {
-  const ov = document.createElement("div");
+  const ov = document.createElement("div"), oft = (t.post || 0) >= 2;
   ov.className = "overlay";
-  ov.innerHTML = `<div class="sheet" role="dialog" aria-modal="true" aria-labelledby="lsH"><h3 id="lsH">Schon ${t.post}× verschoben<span class="dot">.</span></h3><p class="muted">Weiterschieben hilft nicht. Was machen wir damit?</p>
-  <button class="btn" data-ls="small">Kleiner machen</button><button class="btn ghost" data-ls="drop">Bewusst streichen</button><button class="btn ghost" data-ls="anyway">Trotzdem verschieben</button><button class="link" data-ls="close">Abbrechen</button></div>`;
+  ov.innerHTML = `<div class="sheet" role="dialog" aria-modal="true" aria-labelledby="lsH"><h3 id="lsH">Nicht jetzt<span class="dot">.</span></h3>
+  <p class="muted">${oft ? `Schon ${t.post}× verschoben. ` : ""}Warum nicht? Claude passt die Aufgabe beim nächsten Lauf daran an.</p>
+  <textarea id="lsGrund" rows="3" placeholder="Z. B. „Warte noch auf die USt-IdNr. vom BZSt, danach Brief mit korrigierten Rechnungen an Simplon“"></textarea>
+  <button class="btn" data-ls="anyway">Verschieben</button>
+  ${oft ? `<button class="btn ghost" data-ls="small">Kleiner machen</button><button class="btn ghost" data-ls="drop">Bewusst streichen</button>` : ""}
+  <button class="link" data-ls="close">Abbrechen</button></div>`;
   document.body.appendChild(ov);
-  ov.querySelector("[data-ls=small]").focus();
+  ov.querySelector("#lsGrund").focus();
   ov.addEventListener("click", async (e) => {
     const b = e.target.closest("[data-ls]"); if (!b && e.target !== ov) return;
-    const k = b ? b.dataset.ls : "close"; ov.remove();
+    const k = b ? b.dataset.ls : "close", grund = ov.querySelector("#lsGrund").value.trim(); ov.remove();
     if (k === "small") location.hash = `#aufgabe/${t.id}`;
     if (k === "drop") { await update("aufgaben", t.id, { status: "gestrichen" }); S.aufgaben = S.aufgaben.filter((x) => x.id !== t.id); render(); }
-    if (k === "anyway") { const rec = await update("aufgaben", t.id, { "post+": 1 }); patchLocal("aufgaben", rec); S.skip.add(t.id); logEvent("spaeter", t.id); render(); }
+    if (k === "anyway") {
+      // Mit Grund zählt es nicht als Aufschieben, sondern als Information für Claude.
+      const data = grund ? { kommentare: [...commentsOf(t), { id: Date.now().toString(36), text: grund, at: new Date().toISOString(), von: "niklas", offen: true, art: "nicht_jetzt" }] } : { "post+": 1 };
+      try { const rec = await update("aufgaben", t.id, data); patchLocal("aufgaben", rec); } catch (err) { toast(err.message); }
+      S.skip.add(t.id); logEvent(grund ? "kommentar" : "spaeter", t.id, grund.slice(0, 200));
+      if (grund) toast("Grund gespeichert. Claude passt die Aufgabe an.");
+      render();
+    }
   });
 }
 
@@ -563,9 +582,7 @@ document.addEventListener("click", async (e) => {
   if ("pause" in d) { S.pause && S.pause(); return; }
   if (d.later) {
     const t = S.aufgaben.find((x) => x.id === d.later); if (!t) return;
-    if ((t.post || 0) >= 2) return laterSheet(t);
-    try { const rec = await update("aufgaben", t.id, { "post+": 1 }); patchLocal("aufgaben", rec); } catch {}
-    S.skip.add(t.id); logEvent("spaeter", t.id); render(); return;
+    return laterSheet(t);
   }
   if (d.stepdone) {
     // Gibt es schon einen nächsten Schritt in der Liste, direkt dorthin weiter; sonst nach dem nächsten fragen.
